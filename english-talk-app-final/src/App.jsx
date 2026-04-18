@@ -485,6 +485,8 @@ export default function EnglishConversationApp() {
   const recognitionRef = useRef(null);
   const transcriptRef = useRef("");
   const finalTranscriptRef = useRef(""); // 확정된 final 결과만 누적 (interim 제외)
+  const sessionBaseRef = useRef(""); // Chrome이 세션을 끊을 때까지의 이전 세션 누적 텍스트
+  const silenceTriggeredRef = useRef(false); // 침묵 타이머가 발동해서 stop()한 것인지 구분
   const handleSendRef = useRef(null);
   const silenceTimerRef = useRef(null);
 
@@ -695,9 +697,11 @@ export default function EnglishConversationApp() {
       //   새 final이 이전 final을 포함하면 덮어쓰고, 아니면 추가
       const finalParts = [];
       let interimTranscript = "";
+      let hasNewFinal = false;
       for (let i = 0; i < event.results.length; i++) {
         const result = event.results[i];
         if (result.isFinal) {
+          hasNewFinal = true;
           const text = result[0].transcript.trim();
           if (!text) continue;
           if (finalParts.length > 0) {
@@ -716,16 +720,29 @@ export default function EnglishConversationApp() {
           interimTranscript += result[0].transcript;
         }
       }
-      const finalTranscript = finalParts.join(" ");
-      const combined = (finalTranscript + " " + interimTranscript).replace(/\s+/g, " ").trim();
-      transcriptRef.current = combined;
-      setInput(combined);
+      // ⭐ 현재 세션 결과 + 이전 세션들의 누적 결과 결합
+      // sessionBaseRef = Chrome이 onend로 세션을 끊었을 때 이전까지의 최종 텍스트
+      const currentSessionFinal = finalParts.join(" ");
+      const fullTranscript = [sessionBaseRef.current, currentSessionFinal, interimTranscript]
+        .filter(s => s && s.trim())
+        .join(" ")
+        .replace(/\s+/g, " ")
+        .trim();
 
-      clearSilenceTimer();
-      if (handsFreeActiveRef.current && combined.length >= 2) {
-        silenceTimerRef.current = setTimeout(() => {
-          try { recognition.stop(); } catch {}
-        }, silenceThresholdRef.current);
+      transcriptRef.current = fullTranscript;
+      setInput(fullTranscript);
+
+      // ⭐ 타이머는 "새 final 확정이 있을 때만" 리셋/시작
+      // interim 상태(= 계속 말하는 중)에서는 타이머 건드리지 않음
+      // → 말하는 중 짧은 쉼은 Chrome의 interim으로 유지되어 타이머 발동 안 함
+      if (hasNewFinal) {
+        clearSilenceTimer();
+        if (handsFreeActiveRef.current && fullTranscript.length >= 2) {
+          silenceTimerRef.current = setTimeout(() => {
+            silenceTriggeredRef.current = true; // 침묵 타이머 발동 표시 → onend에서 전송
+            try { recognition.stop(); } catch {}
+          }, silenceThresholdRef.current);
+        }
       }
     };
 
@@ -734,7 +751,7 @@ export default function EnglishConversationApp() {
     };
 
     recognition.onend = () => {
-      console.log("[Speech] ⏹ 음성 인식 종료");
+      console.log("[Speech] ⏹ 음성 인식 종료 (silenceTriggered:", silenceTriggeredRef.current, ")");
       clearSilenceTimer();
       setIsListening(false);
       if (!handsFreeActiveRef.current) return;
@@ -742,24 +759,51 @@ export default function EnglishConversationApp() {
       if (isLoadingRef.current) return;
 
       const text = transcriptRef.current.trim();
-      if (text.length >= 2) {
+
+      // ⭐ 케이스 A: 침묵 타이머가 발동해서 stop() 호출된 경우 → 전송
+      if (silenceTriggeredRef.current) {
+        silenceTriggeredRef.current = false;
+        sessionBaseRef.current = ""; // 리셋
+        if (text.length >= 2) {
+          transcriptRef.current = "";
+          finalTranscriptRef.current = "";
+          if (handleSendRef.current) handleSendRef.current(text);
+          return;
+        }
+        // 짧거나 빈 텍스트면 재시작
         transcriptRef.current = "";
         finalTranscriptRef.current = "";
-        if (handleSendRef.current) handleSendRef.current(text);
+        setInput("");
+        setTimeout(() => {
+          if (handsFreeActiveRef.current && !isSpeakingRef.current && !isLoadingRef.current) {
+            try {
+              recognition.continuous = handsFreeModeRef.current;
+              recognition.start();
+              setIsListening(true);
+            } catch {}
+          }
+        }, 200);
         return;
       }
-      transcriptRef.current = "";
-      finalTranscriptRef.current = "";
-      setInput("");
+
+      // ⭐ 케이스 B: Chrome이 자체적으로 세션 종료 (사용자가 아직 말하는 중일 수 있음)
+      // text는 이미 (이전 sessionBaseRef + 현재 세션 final + interim)이 합쳐진 값
+      // → 이걸 새 sessionBaseRef로 "교체"(append 아님)하고 transcriptRef 초기화
+      //    그래야 다음 세션 onresult에서 중복 누적 안 됨
+      sessionBaseRef.current = text; // 빈 문자열이어도 OK
+      transcriptRef.current = ""; // ⭐ 중요: 다음 세션은 fresh state
+      if (text.length > 0) {
+        console.log("[Speech] 💾 세션 유지:", text);
+      }
       setTimeout(() => {
         if (handsFreeActiveRef.current && !isSpeakingRef.current && !isLoadingRef.current) {
           try {
-            recognition.continuous = handsFreeModeRef.current; // 핸즈프리일 때 true (긴 침묵 허용)
+            recognition.continuous = handsFreeModeRef.current;
             recognition.start();
             setIsListening(true);
           } catch {}
         }
-      }, 200);
+      }, 100);
     };
 
     recognition.onerror = (event) => {
@@ -1021,6 +1065,8 @@ If no corrections: "correction": null, "correction_note": null, "minor_issues": 
     setInput("");
     transcriptRef.current = "";
     finalTranscriptRef.current = "";
+    sessionBaseRef.current = "";
+    silenceTriggeredRef.current = false;
     setIsLoading(true);
     isLoadingRef.current = true;
 
@@ -1308,6 +1354,8 @@ If no corrections: "correction": null, "correction_note": null, "minor_issues": 
     handsFreeActiveRef.current = true;
     transcriptRef.current = "";
     finalTranscriptRef.current = "";
+    sessionBaseRef.current = "";
+    silenceTriggeredRef.current = false;
     setInput("");
     try {
       recognitionRef.current.continuous = handsFreeModeRef.current; // 핸즈프리일 때 true: Android Chrome 중복 방지
@@ -1323,6 +1371,8 @@ If no corrections: "correction": null, "correction_note": null, "minor_issues": 
     handsFreeActiveRef.current = false;
     setHandsFreeActive(false);
     clearSilenceTimer();
+    sessionBaseRef.current = "";
+    silenceTriggeredRef.current = false;
     if (recognitionRef.current) {
       try { recognitionRef.current.stop(); } catch {}
     }
