@@ -5,6 +5,7 @@ import {
   X, Trash2, Check, Headphones, Radio, Clock, Target,
   Award, TrendingUp, AlertCircle, RefreshCw,
   Gauge, Zap, FileText, BarChart3, Users, Play,
+  Calendar, StopCircle, Flame,
 } from "lucide-react";
 
 // ========== CONSTANTS ==========
@@ -438,6 +439,7 @@ export default function EnglishConversationApp() {
   const [showSettings, setShowSettings] = useState(false);
   const [showVocabPanel, setShowVocabPanel] = useState(false);
   const [showCharacterPicker, setShowCharacterPicker] = useState(false);
+  const [showStudyLog, setShowStudyLog] = useState(false);
   const [isListening, setIsListening] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [speakingIdx, setSpeakingIdx] = useState(null);
@@ -467,6 +469,7 @@ export default function EnglishConversationApp() {
   const inputRef = useRef(null);
   const recognitionRef = useRef(null);
   const transcriptRef = useRef("");
+  const finalTranscriptRef = useRef(""); // 확정된 final 결과만 누적 (interim 제외)
   const handleSendRef = useRef(null);
   const silenceTimerRef = useRef(null);
 
@@ -661,20 +664,36 @@ export default function EnglishConversationApp() {
     recognition.interimResults = true;
 
     recognition.onresult = (event) => {
-      // final(확정된) 결과와 interim(중간) 결과를 분리
-      // continuous 모드에서 final이 누적되면서 interim까지 덧붙으면 중복 발생
-      let finalTranscript = "";
+      // ⭐ Android Chrome 하이브리드 방어:
+      // Chrome은 각 final이 "이전 final을 포함한 누적 텍스트"로 옴
+      //   예: final1="I", final2="I love", final3="I love you"
+      // 단순 합치면 "I I love I love you" 중복. 해결:
+      //   새 final이 이전 final을 포함하면 덮어쓰고, 아니면 추가
+      const finalParts = [];
       let interimTranscript = "";
       for (let i = 0; i < event.results.length; i++) {
         const result = event.results[i];
         if (result.isFinal) {
-          finalTranscript += result[0].transcript + " ";
+          const text = result[0].transcript.trim();
+          if (!text) continue;
+          if (finalParts.length > 0) {
+            const last = finalParts[finalParts.length - 1].toLowerCase();
+            const curr = text.toLowerCase();
+            // 새 텍스트가 이전 것을 포함 → 덮어쓰기
+            if (curr.includes(last) || last.includes(curr)) {
+              finalParts[finalParts.length - 1] = curr.length >= last.length ? text : finalParts[finalParts.length - 1];
+            } else {
+              finalParts.push(text);
+            }
+          } else {
+            finalParts.push(text);
+          }
         } else {
           interimTranscript += result[0].transcript;
         }
       }
-      // 화면에는 final + interim을 합쳐서 보여주되, final은 공백으로 구분해 중복 방지
-      const combined = (finalTranscript + interimTranscript).replace(/\s+/g, " ").trim();
+      const finalTranscript = finalParts.join(" ");
+      const combined = (finalTranscript + " " + interimTranscript).replace(/\s+/g, " ").trim();
       transcriptRef.current = combined;
       setInput(combined);
 
@@ -701,15 +720,17 @@ export default function EnglishConversationApp() {
       const text = transcriptRef.current.trim();
       if (text.length >= 2) {
         transcriptRef.current = "";
+        finalTranscriptRef.current = "";
         if (handleSendRef.current) handleSendRef.current(text);
         return;
       }
       transcriptRef.current = "";
+      finalTranscriptRef.current = "";
       setInput("");
       setTimeout(() => {
         if (handsFreeActiveRef.current && !isSpeakingRef.current && !isLoadingRef.current) {
           try {
-            recognition.continuous = handsFreeModeRef.current;
+            recognition.continuous = false; // 항상 false: Android Chrome 중복 방지
             recognition.start();
             setIsListening(true);
           } catch {}
@@ -744,7 +765,7 @@ export default function EnglishConversationApp() {
         setTimeout(() => {
           if (handsFreeActiveRef.current && !isSpeakingRef.current && !isLoadingRef.current) {
             try {
-              recognition.continuous = handsFreeModeRef.current;
+              recognition.continuous = false; // 항상 false: Android Chrome 중복 방지
               recognition.start();
               setIsListening(true);
             } catch {}
@@ -876,9 +897,93 @@ If no corrections: "correction": null, "correction_note": null, "minor_issues": 
     }
   };
 
+  // ========== 학습 로그 (날짜별 스케줄표) ==========
+  const STUDY_LOG_KEY = "english-talk-study-log";
+
+  const getTodayKey = () => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  };
+
+  const recordStudyActivity = ({ messageSent = false, sessionEnd = false, vocabAdded = false } = {}) => {
+    try {
+      const today = getTodayKey();
+      const now = Date.now();
+      const raw = localStorage.getItem(STUDY_LOG_KEY);
+      const log = raw ? JSON.parse(raw) : {};
+      if (!log[today]) {
+        log[today] = { messages: 0, sessions: 0, vocab: 0, activeMs: 0, firstSeen: now, lastActivity: now };
+      }
+      // 활동 시간 누적: 이전 활동으로부터 5분 이내면 시간 차이를 더함
+      const FIVE_MIN = 5 * 60 * 1000;
+      const prevActivity = log[today].lastActivity || log[today].firstSeen || now;
+      const gap = now - prevActivity;
+      if (gap > 0 && gap < FIVE_MIN) {
+        log[today].activeMs = (log[today].activeMs || 0) + gap;
+      }
+      if (messageSent) log[today].messages += 1;
+      if (sessionEnd) log[today].sessions += 1;
+      if (vocabAdded) log[today].vocab += 1;
+      log[today].lastActivity = now;
+      log[today].lastSeen = now;
+      // 최근 365일만 유지
+      const cutoff = now - 365 * 24 * 60 * 60 * 1000;
+      Object.keys(log).forEach(k => {
+        if ((log[k].lastSeen || 0) < cutoff) delete log[k];
+      });
+      localStorage.setItem(STUDY_LOG_KEY, JSON.stringify(log));
+    } catch (e) {
+      console.warn("[StudyLog] 기록 실패:", e);
+    }
+  };
+
+  // 대화 종료 명령어 목록 (한/영)
+  const END_CONVERSATION_PHRASES = [
+    // 한국어
+    "대화 끝내기", "대화끝내기", "대화 종료", "대화종료",
+    "대화 그만", "대화 멈춰", "이제 그만", "그만할래",
+    // 영어
+    "end conversation", "end the conversation",
+    "stop conversation", "stop the conversation",
+    "finish conversation", "finish the conversation",
+    "end chat", "stop chat", "finish chat",
+    "let's end", "let's stop", "let's finish",
+  ];
+
+  const isEndCommand = (text) => {
+    if (!text) return false;
+    const normalized = text.trim().toLowerCase().replace(/[.,!?。]/g, "");
+    return END_CONVERSATION_PHRASES.some(p => normalized === p.toLowerCase());
+  };
+
+  const endConversation = () => {
+    stopSpeaking();
+    endHandsFreeSession();
+    setIsListening(false);
+    // 시스템 메시지로 종료 안내 표시
+    setMessages(prev => [...prev, {
+      role: "assistant",
+      content: "Great conversation! Talk to you next time! 👋",
+      korean: "좋은 대화였어요! 다음에 또 만나요! 👋",
+      correction: null, correctionNote: null, characterId,
+      isSystemEnd: true,
+    }]);
+    // 학습 로그 기록 (대화 종료 시점)
+    recordStudyActivity({ sessionEnd: true });
+  };
+
   const handleSend = async (textOverride) => {
     const trimmed = (textOverride ?? input).trim();
     if (!trimmed || isLoading) return;
+
+    // ⭐ 종료 명령어 감지
+    if (isEndCommand(trimmed)) {
+      setInput("");
+      transcriptRef.current = "";
+      finalTranscriptRef.current = "";
+      endConversation();
+      return;
+    }
 
     clearSilenceTimer();
     if (recognitionRef.current && isListening) {
@@ -891,8 +996,12 @@ If no corrections: "correction": null, "correction_note": null, "minor_issues": 
     setMessages(newMessages);
     setInput("");
     transcriptRef.current = "";
+    finalTranscriptRef.current = "";
     setIsLoading(true);
     isLoadingRef.current = true;
+
+    // 학습 로그 기록 (메시지 전송 시점)
+    recordStudyActivity({ messageSent: true });
 
     try {
       const { parsed, raw } = await callClaude(trimmed, messages);
@@ -920,7 +1029,7 @@ If no corrections: "correction": null, "correction_note": null, "minor_issues": 
         setTimeout(() => {
           if (handsFreeActiveRef.current && recognitionRef.current) {
             try {
-              recognitionRef.current.continuous = handsFreeModeRef.current;
+              recognitionRef.current.continuous = false; // 항상 false
               recognitionRef.current.start();
               setIsListening(true);
             } catch {}
@@ -934,7 +1043,7 @@ If no corrections: "correction": null, "correction_note": null, "minor_issues": 
         setTimeout(() => {
           if (handsFreeActiveRef.current && recognitionRef.current) {
             try {
-              recognitionRef.current.continuous = handsFreeModeRef.current;
+              recognitionRef.current.continuous = false; // 항상 false
               recognitionRef.current.start();
               setIsListening(true);
             } catch {}
@@ -1088,7 +1197,7 @@ If no corrections: "correction": null, "correction_note": null, "minor_issues": 
         setTimeout(() => {
           if (handsFreeActiveRef.current && !isSpeakingRef.current && !isLoadingRef.current && recognitionRef.current) {
             try {
-              recognitionRef.current.continuous = handsFreeModeRef.current;
+              recognitionRef.current.continuous = false; // 항상 false
               recognitionRef.current.start();
               setIsListening(true);
             } catch {}
@@ -1160,9 +1269,10 @@ If no corrections: "correction": null, "correction_note": null, "minor_issues": 
     setHandsFreeActive(true);
     handsFreeActiveRef.current = true;
     transcriptRef.current = "";
+    finalTranscriptRef.current = "";
     setInput("");
     try {
-      recognitionRef.current.continuous = true;
+      recognitionRef.current.continuous = false; // 항상 false: Android Chrome 중복 방지
       recognitionRef.current.start();
       setIsListening(true);
     } catch (e) {
@@ -1198,6 +1308,8 @@ If no corrections: "correction": null, "correction_note": null, "minor_issues": 
         if (!ok) return;
 
         transcriptRef.current = "";
+
+        finalTranscriptRef.current = "";
         setInput("");
         try {
           recognitionRef.current.continuous = false;
@@ -1220,6 +1332,7 @@ If no corrections: "correction": null, "correction_note": null, "minor_issues": 
     };
     setVocabulary([newItem, ...vocabulary]);
     setVocabModal(null);
+    recordStudyActivity({ vocabAdded: true });
   };
   const deleteVocab = (id) => setVocabulary(vocabulary.filter(v => v.id !== id));
 
@@ -1296,20 +1409,35 @@ If no corrections: "correction": null, "correction_note": null, "minor_issues": 
       style={{ fontFamily: "'Manrope', 'Pretendard', -apple-system, sans-serif" }}>
 
       <header className="border-b border-stone-200 bg-white/90 backdrop-blur sticky top-0 z-10">
+        {/* ⭐ 상단 브랜드 그라데이션 악센트 라인 */}
+        <div className="h-1 bg-gradient-to-r from-amber-500 via-emerald-500 via-teal-500 to-cyan-500"></div>
+
         <div className="max-w-3xl mx-auto px-5 py-3 flex items-center justify-between gap-3">
           <div className="flex items-center gap-3 min-w-0">
             <button
               onClick={() => setShowCharacterPicker(true)}
-              className="hover:scale-105 transition-transform"
+              className="hover:scale-105 transition-transform relative"
               title={`${character.name} (탭하여 캐릭터 변경)`}
             >
               <Avatar character={character} size="sm" />
+              {/* 아바타 우하단 작은 star 장식 */}
+              <span className="absolute -bottom-0.5 -right-0.5 w-3.5 h-3.5 bg-gradient-to-br from-amber-400 to-amber-500 rounded-full flex items-center justify-center text-[8px] shadow-sm ring-1 ring-white">
+                ✦
+              </span>
             </button>
             <div className="min-w-0">
-              <h1 className="text-lg font-semibold text-stone-900 tracking-tight leading-none" style={{ fontFamily: "'Fraunces', serif" }}>
-                English Talk
+              {/* ⭐ STUDIO 99 브랜드 배지 (작은 상단 라벨) */}
+              <div className="flex items-center gap-1.5 mb-0.5">
+                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-gradient-to-r from-stone-900 to-stone-700 text-white text-[8px] font-black tracking-[0.15em] rounded-sm uppercase">
+                  <span className="text-amber-400">✦</span>STUDIO 99
+                </span>
+                <span className="text-[9px] font-semibold tracking-wider text-stone-400 uppercase hidden sm:inline">Presents</span>
+              </div>
+              {/* 메인 타이틀 */}
+              <h1 className="text-lg font-bold text-stone-900 tracking-tight leading-none" style={{ fontFamily: "'Fraunces', serif" }}>
+                English <span className="bg-gradient-to-r from-emerald-600 to-teal-600 bg-clip-text text-transparent italic">Talk</span>
               </h1>
-              <div className="flex items-center gap-1.5 mt-1 text-xs text-stone-500 flex-wrap">
+              <div className="flex items-center gap-1.5 mt-1.5 text-xs text-stone-500 flex-wrap">
                 <button
                   onClick={() => setShowCharacterPicker(true)}
                   className="font-medium text-stone-700 hover:text-stone-900 transition-colors"
@@ -1352,6 +1480,19 @@ If no corrections: "correction": null, "correction_note": null, "minor_issues": 
               <span className="hidden sm:inline">{messages.length === 0 ? "대화 시작" : "새 대화"}</span>
             </button>
 
+            {/* ⭐ 대화 끝내기 버튼 (진행 중일 때만) */}
+            {messages.length > 0 && (
+              <button
+                onClick={() => {
+                  if (window.confirm("대화를 종료하시겠습니까?")) endConversation();
+                }}
+                className="p-2 rounded-lg hover:bg-red-50 text-stone-600 hover:text-red-600 transition-colors"
+                title="대화 끝내기 (또는 '대화 끝내기' / 'end conversation' 이라고 말하기)"
+              >
+                <StopCircle className="w-4 h-4" />
+              </button>
+            )}
+
             <button
               onClick={() => setShowCharacterPicker(true)}
               className="p-2 rounded-lg hover:bg-stone-100 text-stone-600 transition-colors"
@@ -1381,6 +1522,14 @@ If no corrections: "correction": null, "correction_note": null, "minor_issues": 
                   {vocabulary.length > 99 ? "99+" : vocabulary.length}
                 </span>
               )}
+            </button>
+            {/* ⭐ 학습 기록 (캘린더) 버튼 */}
+            <button
+              onClick={() => setShowStudyLog(true)}
+              className="p-2 rounded-lg hover:bg-stone-100 text-stone-600 transition-colors"
+              title="학습 기록"
+            >
+              <Calendar className="w-4 h-4" />
             </button>
             <button onClick={handleReset} className="p-2 rounded-lg hover:bg-stone-100 text-stone-600 transition-colors" title="대화 초기화">
               <RotateCcw className="w-4 h-4" />
@@ -1716,6 +1865,10 @@ If no corrections: "correction": null, "correction_note": null, "minor_issues": 
         <VocabPanel vocabulary={vocabulary} onClose={() => setShowVocabPanel(false)} onDelete={deleteVocab} onSpeak={(text) => speak(text)} />
       )}
 
+      {showStudyLog && (
+        <StudyLogModal onClose={() => setShowStudyLog(false)} />
+      )}
+
       {vocabModal && (
         <SaveVocabModal initial={vocabModal} onSave={saveVocab} onClose={() => setVocabModal(null)} />
       )}
@@ -1732,6 +1885,210 @@ If no corrections: "correction": null, "correction_note": null, "minor_issues": 
 }
 
 // ========== SUB-COMPONENTS ==========
+
+function StudyLogModal({ onClose }) {
+  const [viewMonth, setViewMonth] = useState(new Date());
+  const [log, setLog] = useState({});
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem("english-talk-study-log");
+      setLog(raw ? JSON.parse(raw) : {});
+    } catch {
+      setLog({});
+    }
+  }, []);
+
+  // OK 달성 기준: 공부 시간 20분 이상 OR 메시지 20회 이상
+  const OK_MIN_MINUTES = 20;
+  const OK_MIN_MESSAGES = 20;
+  const isDayOK = (entry) => {
+    if (!entry) return false;
+    const minutes = (entry.activeMs || 0) / 60000;
+    return minutes >= OK_MIN_MINUTES || (entry.messages || 0) >= OK_MIN_MESSAGES;
+  };
+
+  const year = viewMonth.getFullYear();
+  const month = viewMonth.getMonth();
+  const firstDay = new Date(year, month, 1);
+  const lastDay = new Date(year, month + 1, 0);
+  const daysInMonth = lastDay.getDate();
+  const startWeekday = firstDay.getDay();
+
+  const cells = [];
+  for (let i = 0; i < startWeekday; i++) cells.push(null);
+  for (let d = 1; d <= daysInMonth; d++) cells.push(d);
+
+  const today = new Date();
+  const todayKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+
+  const totalDays = Object.values(log).filter(v => (v.messages || 0) > 0).length;
+  const totalMessages = Object.values(log).reduce((s, v) => s + (v.messages || 0), 0);
+  const okDays = Object.values(log).filter(isDayOK).length;
+
+  // OK 달성 연속일 계산 (오늘 포함 or 어제부터)
+  let okStreak = 0;
+  const sd = new Date();
+  const sdKey = `${sd.getFullYear()}-${String(sd.getMonth() + 1).padStart(2, "0")}-${String(sd.getDate()).padStart(2, "0")}`;
+  if (!isDayOK(log[sdKey])) {
+    sd.setDate(sd.getDate() - 1);
+  }
+  while (true) {
+    const k = `${sd.getFullYear()}-${String(sd.getMonth() + 1).padStart(2, "0")}-${String(sd.getDate()).padStart(2, "0")}`;
+    if (isDayOK(log[k])) {
+      okStreak++;
+      sd.setDate(sd.getDate() - 1);
+    } else {
+      break;
+    }
+  }
+
+  const getColor = (entry) => {
+    if (!entry || !entry.messages) return "bg-stone-100";
+    if (isDayOK(entry)) return "bg-emerald-600"; // OK 달성: 진한 녹색
+    const count = entry.messages || 0;
+    if (count < 5) return "bg-emerald-200";
+    if (count < 10) return "bg-emerald-300";
+    return "bg-emerald-400"; // 공부했지만 OK 미달
+  };
+
+  const selectedEntry = log[todayKey];
+  const selectedMinutes = Math.floor((selectedEntry?.activeMs || 0) / 60000);
+  const selectedIsOK = isDayOK(selectedEntry);
+
+  return (
+    <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4" onClick={onClose}>
+      <div className="bg-white rounded-2xl p-6 max-w-md w-full max-h-[90vh] overflow-y-auto shadow-2xl" onClick={e => e.stopPropagation()}>
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-xl font-semibold flex items-center gap-2">
+            <Calendar className="w-5 h-5 text-emerald-600" />학습 기록
+          </h2>
+          <button onClick={onClose} className="p-1 hover:bg-stone-100 rounded-lg">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        {/* OK 기준 안내 */}
+        <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-3 mb-4 text-xs text-emerald-800">
+          <div className="font-semibold mb-1">🎯 OK 달성 기준</div>
+          <div>• 공부 시간 <b>{OK_MIN_MINUTES}분 이상</b> 또는</div>
+          <div>• 대화 메시지 <b>{OK_MIN_MESSAGES}회 이상</b></div>
+        </div>
+
+        {/* 통계 카드 */}
+        <div className="grid grid-cols-3 gap-2 mb-5">
+          <div className="bg-emerald-50 rounded-xl p-3 text-center">
+            <div className="text-[10px] text-stone-500 mb-1">✓ OK 달성일</div>
+            <div className="text-lg font-bold text-emerald-700">{okDays}일</div>
+          </div>
+          <div className="bg-amber-50 rounded-xl p-3 text-center">
+            <div className="text-[10px] text-stone-500 mb-1">연속 OK</div>
+            <div className="text-lg font-bold text-amber-600 flex items-center justify-center gap-1">
+              <Flame className="w-4 h-4" />{okStreak}일
+            </div>
+          </div>
+          <div className="bg-stone-50 rounded-xl p-3 text-center">
+            <div className="text-[10px] text-stone-500 mb-1">총 학습일</div>
+            <div className="text-lg font-bold text-stone-900">{totalDays}일</div>
+          </div>
+        </div>
+
+        {/* 월 네비게이션 */}
+        <div className="flex items-center justify-between mb-3 px-2">
+          <button onClick={() => { const m = new Date(viewMonth); m.setMonth(m.getMonth() - 1); setViewMonth(m); }}
+            className="w-8 h-8 rounded-lg hover:bg-stone-100 text-stone-600 text-lg">‹</button>
+          <div className="font-semibold text-stone-900">{year}년 {month + 1}월</div>
+          <button onClick={() => { const m = new Date(viewMonth); m.setMonth(m.getMonth() + 1); setViewMonth(m); }}
+            className="w-8 h-8 rounded-lg hover:bg-stone-100 text-stone-600 text-lg">›</button>
+        </div>
+
+        {/* 요일 헤더 */}
+        <div className="grid grid-cols-7 gap-1 text-center text-[11px] text-stone-400 font-medium mb-1">
+          {["일", "월", "화", "수", "목", "금", "토"].map(d => <div key={d}>{d}</div>)}
+        </div>
+
+        {/* 캘린더 그리드 */}
+        <div className="grid grid-cols-7 gap-1">
+          {cells.map((d, i) => {
+            if (d === null) return <div key={i}></div>;
+            const key = `${year}-${String(month + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+            const entry = log[key];
+            const isToday = key === todayKey;
+            const ok = isDayOK(entry);
+            const minutes = Math.floor((entry?.activeMs || 0) / 60000);
+            return (
+              <div
+                key={i}
+                className={`relative aspect-square rounded-md flex items-center justify-center text-xs ${getColor(entry)} ${isToday ? "ring-2 ring-amber-500 ring-offset-1" : ""} transition-all`}
+                title={entry ? `${d}일: ${entry.messages}개 메시지, ${minutes}분 학습${ok ? " ✓ OK!" : ""}` : `${d}일`}
+              >
+                <span className={entry && entry.messages > 0 ? (ok ? "text-white font-bold" : "text-stone-900 font-semibold") : "text-stone-400"}>{d}</span>
+                {ok && (
+                  <span className="absolute -top-1 -right-1 w-4 h-4 bg-amber-500 text-white rounded-full flex items-center justify-center text-[9px] font-black shadow-sm">
+                    ✓
+                  </span>
+                )}
+              </div>
+            );
+          })}
+        </div>
+
+        {/* 범례 */}
+        <div className="flex items-center gap-2 mt-4 text-[10px] text-stone-500 justify-center flex-wrap">
+          <div className="flex items-center gap-1"><div className="w-3 h-3 bg-stone-100 rounded-sm"></div><span>미공부</span></div>
+          <div className="flex items-center gap-1"><div className="w-3 h-3 bg-emerald-200 rounded-sm"></div><span>소량</span></div>
+          <div className="flex items-center gap-1"><div className="w-3 h-3 bg-emerald-400 rounded-sm"></div><span>공부 중</span></div>
+          <div className="flex items-center gap-1">
+            <div className="relative w-3 h-3 bg-emerald-600 rounded-sm">
+              <span className="absolute -top-1 -right-1 w-2.5 h-2.5 bg-amber-500 rounded-full flex items-center justify-center text-[6px] text-white font-black">✓</span>
+            </div>
+            <span>OK 달성</span>
+          </div>
+        </div>
+
+        {/* 오늘 상세 */}
+        {selectedEntry && (
+          <div className={`mt-5 pt-5 border-t border-stone-200 ${selectedIsOK ? "" : ""}`}>
+            <div className="flex items-center justify-between mb-2">
+              <div className="text-xs text-stone-500">📅 오늘의 학습</div>
+              {selectedIsOK && (
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-amber-500 text-white rounded-full text-[10px] font-bold">
+                  ✓ OK 달성!
+                </span>
+              )}
+            </div>
+            <div className="flex items-center justify-between text-sm">
+              <span className="text-stone-600">공부 시간</span>
+              <span className={`font-semibold ${selectedMinutes >= OK_MIN_MINUTES ? "text-emerald-600" : ""}`}>
+                {selectedMinutes}분 {selectedMinutes >= OK_MIN_MINUTES ? "✓" : `(${OK_MIN_MINUTES}분 목표)`}
+              </span>
+            </div>
+            <div className="flex items-center justify-between text-sm mt-1">
+              <span className="text-stone-600">메시지</span>
+              <span className={`font-semibold ${(selectedEntry.messages || 0) >= OK_MIN_MESSAGES ? "text-emerald-600" : ""}`}>
+                {selectedEntry.messages || 0}개 {(selectedEntry.messages || 0) >= OK_MIN_MESSAGES ? "✓" : `(${OK_MIN_MESSAGES}개 목표)`}
+              </span>
+            </div>
+            <div className="flex items-center justify-between text-sm mt-1">
+              <span className="text-stone-600">대화 세션</span>
+              <span className="font-semibold">{selectedEntry.sessions || 0}회</span>
+            </div>
+            {selectedEntry.vocab > 0 && (
+              <div className="flex items-center justify-between text-sm mt-1">
+                <span className="text-stone-600">저장한 단어</span>
+                <span className="font-semibold">{selectedEntry.vocab}개</span>
+              </div>
+            )}
+          </div>
+        )}
+
+        <p className="text-[10px] text-stone-400 mt-4 text-center">
+          하루 20분 또는 20회 메시지면 OK! 연속 달성이 끊기지 않게 꾸준히 💪
+        </p>
+      </div>
+    </div>
+  );
+}
 
 function ToggleButton({ icon, label, on, onClick }) {
   return (
@@ -2155,17 +2512,30 @@ function AdaptiveLevelTest({ onComplete, onSkip, speak, stopSpeaking, recognitio
     const origOnError = rec.onerror;
 
     rec.onresult = (event) => {
-      let finalTranscript = "";
+      // 하이브리드: Android Chrome 누적 final 덮어쓰기
+      const finalParts = [];
       let interimTranscript = "";
       for (let i = 0; i < event.results.length; i++) {
         const result = event.results[i];
         if (result.isFinal) {
-          finalTranscript += result[0].transcript + " ";
+          const text = result[0].transcript.trim();
+          if (!text) continue;
+          if (finalParts.length > 0) {
+            const last = finalParts[finalParts.length - 1].toLowerCase();
+            const curr = text.toLowerCase();
+            if (curr.includes(last) || last.includes(curr)) {
+              finalParts[finalParts.length - 1] = curr.length >= last.length ? text : finalParts[finalParts.length - 1];
+            } else {
+              finalParts.push(text);
+            }
+          } else {
+            finalParts.push(text);
+          }
         } else {
           interimTranscript += result[0].transcript;
         }
       }
-      const combined = (finalTranscript + interimTranscript).replace(/\s+/g, " ").trim();
+      const combined = (finalParts.join(" ") + " " + interimTranscript).replace(/\s+/g, " ").trim();
       if (!speechStartTimeRef.current) speechStartTimeRef.current = Date.now();
       setCurrentInput(combined);
     };
