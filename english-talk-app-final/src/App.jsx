@@ -754,7 +754,7 @@ export default function EnglishConversationApp() {
       setTimeout(() => {
         if (handsFreeActiveRef.current && !isSpeakingRef.current && !isLoadingRef.current) {
           try {
-            recognition.continuous = false; // 항상 false: Android Chrome 중복 방지
+            recognition.continuous = handsFreeModeRef.current; // 핸즈프리일 때 true (긴 침묵 허용)
             recognition.start();
             setIsListening(true);
           } catch {}
@@ -789,7 +789,7 @@ export default function EnglishConversationApp() {
         setTimeout(() => {
           if (handsFreeActiveRef.current && !isSpeakingRef.current && !isLoadingRef.current) {
             try {
-              recognition.continuous = false; // 항상 false: Android Chrome 중복 방지
+              recognition.continuous = handsFreeModeRef.current; // 핸즈프리일 때 true (긴 침묵 허용)
               recognition.start();
               setIsListening(true);
             } catch {}
@@ -1053,7 +1053,7 @@ If no corrections: "correction": null, "correction_note": null, "minor_issues": 
         setTimeout(() => {
           if (handsFreeActiveRef.current && recognitionRef.current) {
             try {
-              recognitionRef.current.continuous = false; // 항상 false
+              recognitionRef.current.continuous = handsFreeModeRef.current; // 핸즈프리일 때 true
               recognitionRef.current.start();
               setIsListening(true);
             } catch {}
@@ -1067,7 +1067,7 @@ If no corrections: "correction": null, "correction_note": null, "minor_issues": 
         setTimeout(() => {
           if (handsFreeActiveRef.current && recognitionRef.current) {
             try {
-              recognitionRef.current.continuous = false; // 항상 false
+              recognitionRef.current.continuous = handsFreeModeRef.current; // 핸즈프리일 때 true
               recognitionRef.current.start();
               setIsListening(true);
             } catch {}
@@ -1235,7 +1235,7 @@ If no corrections: "correction": null, "correction_note": null, "minor_issues": 
         setTimeout(() => {
           if (handsFreeActiveRef.current && !isSpeakingRef.current && !isLoadingRef.current && recognitionRef.current) {
             try {
-              recognitionRef.current.continuous = false; // 항상 false
+              recognitionRef.current.continuous = handsFreeModeRef.current; // 핸즈프리일 때 true
               recognitionRef.current.start();
               setIsListening(true);
             } catch {}
@@ -1310,7 +1310,7 @@ If no corrections: "correction": null, "correction_note": null, "minor_issues": 
     finalTranscriptRef.current = "";
     setInput("");
     try {
-      recognitionRef.current.continuous = false; // 항상 false: Android Chrome 중복 방지
+      recognitionRef.current.continuous = handsFreeModeRef.current; // 핸즈프리일 때 true: Android Chrome 중복 방지
       recognitionRef.current.start();
       setIsListening(true);
     } catch (e) {
