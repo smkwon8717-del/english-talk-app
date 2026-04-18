@@ -161,10 +161,24 @@ const DEFAULT_CHARACTER_ID = "emma";
 const TEST_GUIDE_ID = "emma"; // Character that hosts the level test
 
 const SILENCE_PRESETS = [
-  { value: 1500, label: "빠름", sub: "1.5초", desc: "유창한 학습자" },
-  { value: 3000, label: "기본", sub: "3초", desc: "대부분 학습자" },
-  { value: 5000, label: "여유", sub: "5초", desc: "초급/복잡한 문장" },
+  { value: 1500, label: "매우 빠름", sub: "1.5초", desc: "원어민 수준" },
+  { value: 2000, label: "빠름", sub: "2초", desc: "유창함" },
+  { value: 3000, label: "보통", sub: "3초", desc: "중급" },
+  { value: 4000, label: "여유", sub: "4초", desc: "중급 초반" },
+  { value: 5000, label: "넉넉", sub: "5초", desc: "기초" },
+  { value: 7000, label: "충분", sub: "7초", desc: "입문" },
 ];
+
+// 레벨별 권장 침묵 대기 시간 (말하는 중 생각하는 시간)
+// 초급자일수록 길게: 번역·문법 생각하는 인지 부담 고려
+const LEVEL_SILENCE_DEFAULTS = {
+  A1: 7000,  // 입문: 7초
+  A2: 5000,  // 기초: 5초
+  B1: 4000,  // 중급: 4초
+  B2: 3000,  // 중상급: 3초
+  C1: 2000,  // 고급: 2초
+  C2: 1500,  // 원어민: 1.5초
+};
 
 const CORRECTION_MODES = {
   flow: {
@@ -436,6 +450,7 @@ export default function EnglishConversationApp() {
   const [autoSpeak, setAutoSpeak] = useState(true);
   const [handsFreeMode, setHandsFreeMode] = useState(true);
   const [silenceThreshold, setSilenceThreshold] = useState(3000);
+  const [silenceAutoByLevel, setSilenceAutoByLevel] = useState(true); // 레벨 변경 시 자동 조정 여부
   const [showSettings, setShowSettings] = useState(false);
   const [showVocabPanel, setShowVocabPanel] = useState(false);
   const [showCharacterPicker, setShowCharacterPicker] = useState(false);
@@ -552,6 +567,7 @@ export default function EnglishConversationApp() {
       if (typeof saved.autoSpeak === "boolean") setAutoSpeak(saved.autoSpeak);
       if (typeof saved.handsFreeMode === "boolean") setHandsFreeMode(saved.handsFreeMode);
       if (typeof saved.silenceThreshold === "number") setSilenceThreshold(saved.silenceThreshold);
+      if (typeof saved.silenceAutoByLevel === "boolean") setSilenceAutoByLevel(saved.silenceAutoByLevel);
       if (saved.vocabulary) setVocabulary(saved.vocabulary);
       if (saved.accumulatedErrors) setAccumulatedErrors(saved.accumulatedErrors);
       if (typeof saved.hasCompletedLevelTest === "boolean") setHasCompletedLevelTest(saved.hasCompletedLevelTest);
@@ -570,12 +586,20 @@ export default function EnglishConversationApp() {
     if (!hydrated) return;
     storage.set({
       messages, level, scenario, characterId, correctionMode, showTranslation, showCorrection,
-      autoSpeak, handsFreeMode, silenceThreshold, vocabulary, accumulatedErrors,
+      autoSpeak, handsFreeMode, silenceThreshold, silenceAutoByLevel, vocabulary, accumulatedErrors,
       hasCompletedLevelTest, testResult, userProfile, hasCompletedProfile,
     });
   }, [messages, level, scenario, characterId, correctionMode, showTranslation, showCorrection,
-    autoSpeak, handsFreeMode, silenceThreshold, vocabulary, accumulatedErrors,
+    autoSpeak, handsFreeMode, silenceThreshold, silenceAutoByLevel, vocabulary, accumulatedErrors,
     hasCompletedLevelTest, testResult, userProfile, hasCompletedProfile, hydrated]);
+
+  // ⭐ 레벨 변경 시 침묵 대기 시간 자동 조정 (수동 override가 아닌 경우)
+  useEffect(() => {
+    if (!hydrated) return;
+    if (silenceAutoByLevel && LEVEL_SILENCE_DEFAULTS[level]) {
+      setSilenceThreshold(LEVEL_SILENCE_DEFAULTS[level]);
+    }
+  }, [level, hydrated]); // silenceAutoByLevel은 의도적으로 빼둠 (토글 시 별도 처리)
 
   // Load voices (Web Speech API)
   useEffect(() => {
@@ -1062,12 +1086,22 @@ If no corrections: "correction": null, "correction_note": null, "minor_issues": 
   const handleStart = async () => {
     stopSpeaking();
     endHandsFreeSession();
+    // ⭐ 모든 모달/패널 자동 닫기 → 대화 화면으로 즉시 전환
+    setShowSettings(false);
+    setShowCharacterPicker(false);
+    setShowStudyLog(false);
+    setShowVocabPanel(false);
+    setShowReport(false);
+    setVocabModal(null);
     setMessages([]);
     setAccumulatedErrors([]);
     setReportData(null);
     setError("");
     setIsLoading(true);
     isLoadingRef.current = true;
+
+    // ⭐ 페이지 최상단으로 스크롤 (모바일에서 설정 패널이 길 때 대비)
+    window.scrollTo({ top: 0, behavior: "smooth" });
 
     try {
       const char = CHARACTERS[characterId] || CHARACTERS[DEFAULT_CHARACTER_ID];
@@ -1079,6 +1113,10 @@ If no corrections: "correction": null, "correction_note": null, "minor_issues": 
       };
       setMessages([firstMsg]);
       if (autoSpeak && parsed.english) setTimeout(() => speak(parsed.english, 0), 200);
+      // ⭐ 첫 메시지 렌더링 후 대화 영역으로 자동 스크롤
+      setTimeout(() => {
+        chatEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+      }, 500);
     } catch (e) {
       console.error(e);
       setError("시작하지 못했습니다. 다시 시도해 주세요.");
@@ -1712,11 +1750,39 @@ If no corrections: "correction": null, "correction_note": null, "minor_issues": 
               {handsFreeMode && (
                 <div>
                   <label className="text-xs font-semibold text-stone-700 uppercase tracking-wider mb-2 flex items-center gap-1.5">
-                    <Clock className="w-3.5 h-3.5" />응답 대기 시간
+                    <Clock className="w-3.5 h-3.5" />말하는 중 침묵 대기 시간
                   </label>
+                  <p className="text-[11px] text-stone-500 mb-2.5 leading-relaxed">
+                    문장 말하는 중 잠시 멈춰도 기다려주는 시간입니다. 초급자는 길게, 고급자는 짧게 권장.
+                  </p>
+
+                  {/* ⭐ 레벨 자동 조정 토글 */}
+                  <div className={`mb-3 p-2.5 rounded-lg border ${silenceAutoByLevel ? "bg-emerald-50 border-emerald-200" : "bg-stone-50 border-stone-200"}`}>
+                    <label className="flex items-center justify-between cursor-pointer">
+                      <div className="flex-1 pr-3">
+                        <div className="text-xs font-semibold text-stone-900">🎯 내 레벨에 맞춰 자동 조정</div>
+                        <div className="text-[10px] text-stone-500 mt-0.5">
+                          현재 레벨 {LEVELS[level].code} ({LEVELS[level].label}) · 권장 {(LEVEL_SILENCE_DEFAULTS[level] / 1000).toFixed(LEVEL_SILENCE_DEFAULTS[level] % 1000 === 0 ? 0 : 1)}초
+                        </div>
+                      </div>
+                      <input type="checkbox" checked={silenceAutoByLevel}
+                        onChange={(e) => {
+                          setSilenceAutoByLevel(e.target.checked);
+                          if (e.target.checked && LEVEL_SILENCE_DEFAULTS[level]) {
+                            setSilenceThreshold(LEVEL_SILENCE_DEFAULTS[level]);
+                          }
+                        }}
+                        className="w-4 h-4 accent-emerald-600" />
+                    </label>
+                  </div>
+
                   <div className="grid grid-cols-3 gap-2">
                     {SILENCE_PRESETS.map(preset => (
-                      <button key={preset.value} onClick={() => setSilenceThreshold(preset.value)}
+                      <button key={preset.value}
+                        onClick={() => {
+                          setSilenceThreshold(preset.value);
+                          setSilenceAutoByLevel(false); // 수동 선택 시 자동 조정 해제
+                        }}
                         className={`px-3 py-2.5 rounded-lg text-center transition-all ${
                           silenceThreshold === preset.value ? "bg-emerald-700 text-white shadow-sm" : "bg-white text-stone-700 border border-stone-200 hover:border-stone-300"
                         }`}>
